@@ -1,3 +1,10 @@
+# ALERT ALERT ALERT THE RELEASE IS BROKEN
+For the current release to work, you must edit the two y-cruncher config files to fit the number of cores in your system.
+
+Go to the y-cruncher folder in your download directory and open test_bkt_forever.cfg and test_bbp_forever.cfg.
+
+Edit `LogicalCores : ["0-31"]` to `LogicalCores : ["0-15"]`, or `23`, or `11`, or even `7`, depending on how many cores you have, or if you have SMT on or off.
+
 # Ryzen PBO VID Synchronizer
 An easy to use, no-frills tool for quickly synchronizing your VID in a multithreaded workload via PBO offsets on AMD Ryzen CPUs. If you are a normal person, with conventional, ambient cooling, this tool will get you >90% of the way towards your maximum possible, stable performance, in under an hour, hands-free.
 
@@ -60,8 +67,8 @@ Core 15: -34
 
 These values roughly, though not exactly, align with the factory-fused core performance precedence from AMD.
 
-These values result in the two CCDs conjoining within <20MHz of each other and hitting HTFMax limits in y-cruncher BKT at ~5.48ghzGHz, reporting a PPT of ~230w. Under y-cruncher BPP, it reaches thermal throttling conditions at a reported PPT of ~260w and ~4.7GHz across all cores.
+These values result in the two CCDs conjoining within <20MHz of each other and hitting HTFMax limits in y-cruncher BKT at ~5.48ghzGHz, reporting a PPT of ~230w. Under y-cruncher BBP, it reaches thermal throttling conditions at a reported PPT of ~260w and ~4.7GHz across all cores.
 
-For comparison, under "stock" conditions - stock meaning, board limits removed, PBO enabled, but no offsets applied - the BKT PPT is ~275w, with a clock speed of ~5.38GHz on CCD0, and ~5.2GHz on CCD1. For BPP, CCD0 is at ~4.58GHz, CCD1 at ~4.35GHz, and PPT at ~255w. Again, with BKT, it's hitting HTFMax, and with BPP, it's thermal throttling.
+For comparison, under "stock" conditions - stock meaning, board limits removed, PBO enabled, but no offsets applied - the BKT PPT is ~275w, with a clock speed of ~5.38GHz on CCD0, and ~5.2GHz on CCD1. For BBP, CCD0 is at ~4.58GHz, CCD1 at ~4.35GHz, and PPT at ~255w. Again, with BKT, it's hitting HTFMax, and with BBP, it's thermal throttling.
 
 HTFMax makes me sad.
