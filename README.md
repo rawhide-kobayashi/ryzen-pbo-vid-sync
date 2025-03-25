@@ -5,6 +5,9 @@ Go to the y-cruncher folder in your download directory and open test_bkt_forever
 
 Edit `LogicalCores : ["0-31"]` to `LogicalCores : ["0-15"]`, or `23`, or `11`, or even `7`, depending on how many cores you have, or if you have SMT on or off.
 
+# Note about compatiblity with 4/6/12-core skus
+I just realized that this won't work with these skus. ZenStates-Core does not implicitly compensate for the disabled cores when applying per-core PBO offsets. I need to update this to get the disabled core map and compensate for it myself.
+
 # Ryzen PBO VID Synchronizer
 An easy to use, no-frills tool for quickly synchronizing your VID in a multithreaded workload via PBO offsets on AMD Ryzen CPUs. If you are a normal person, with conventional, ambient cooling, this tool will get you >90% of the way towards your maximum possible, stable performance, in under an hour, hands-free.
 
