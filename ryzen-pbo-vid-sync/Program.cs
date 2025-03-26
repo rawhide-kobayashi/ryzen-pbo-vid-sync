@@ -4,45 +4,71 @@ using System.Runtime.InteropServices;
 using RyzenPBOVIDSync.HWiNFO;
 using ZenStates.Core;
 using System.Text.RegularExpressions;
+using System.Security.Principal;
 
 namespace RyzenPBOVIDSync
 {
     class Program
     {
-        private static readonly Cpu ryzen = new();
+        private static readonly Cpu ryzen;
+
+        static Program()
+        {
+            try
+            {
+                ryzen = new Cpu();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                Environment.Exit(1);
+            }
+        }
         private static readonly HWiNFOWrapper hwinfo = new();
 
-        private static MemoryMappedFile mmf;
+        private static MemoryMappedFile? mmf;
 
+        private static readonly ProcessStartInfo ycruncherInfo = new()
+        {
+            FileName = "y-cruncher\\y-cruncher.exe",
+            Arguments = "config y-cruncher\\test.cfg",
+            RedirectStandardInput = false,
+            RedirectStandardOutput = false,
+            RedirectStandardError = false,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        private static readonly Process ycruncher = new() { StartInfo = ycruncherInfo};
+        private static readonly string ycruncherConfigTemplate = @"
+{{
+    Action : ""StressTest""
+    StressTest : {{
+        AllocateLocally : true
+        LogicalCores : [""0-{0}""] 
+        TotalMemory : 12318351360
+        SecondsPerTest : 120
+        SecondsTotal : 0
+        StopOnError : true
+        Tests : [""{1}""] 
+    }}
+}}";
         static int Main()
         {
-            ProcessStartInfo ycruncherBKTInfo = new ProcessStartInfo
+            if (!IsAdministrator())
             {
-                FileName = "y-cruncher\\y-cruncher.exe",
-                Arguments = "config y-cruncher\\test_bkt_forever.cfg",
-                RedirectStandardOutput = false,
-                RedirectStandardError = false,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            Process ycruncherBKT = new Process{StartInfo = ycruncherBKTInfo};
-
-            ProcessStartInfo ycruncherBBPInfo = new ProcessStartInfo
-            {
-                FileName = "y-cruncher\\y-cruncher.exe",
-                Arguments = "config y-cruncher\\test_bbp_forever.cfg",
-                RedirectStandardOutput = false,
-                RedirectStandardError = false,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            Process ycruncherBBP = new Process{StartInfo = ycruncherBBPInfo};
+                Console.WriteLine("This application must be run as an administrator.");
+                Console.WriteLine("Press any key to exit...");
+                Console.ReadKey();
+                Environment.Exit(1);
+            }
 
             Console.WriteLine("Welcome to the Ryzen PBO VID synchronizer!");
             Console.WriteLine("This tool depends on y-cruncher (Alexander Yee) and ZenStates-Core (irusanov) to function.");
             Console.WriteLine("It couldn't exist without their contributions to free software.");
+            Console.WriteLine("Your CPU is going to get *HOT*. This is fine. It is designed to do this. Do not be alarmed by any thermal throttling you may observe in HWiNFO.");
+            Console.WriteLine("Press any key to continue...");
+            Console.ReadKey();
             Console.WriteLine("Setting PBO offset to 0 on all cores...");
             ryzen.SetPsmMarginAllCores(0);
 
@@ -53,58 +79,22 @@ namespace RyzenPBOVIDSync
             catch (Exception Ex)
             {
                 Console.WriteLine("An error occured while opening the HWiNFO shared memory! - " + Ex.Message);
-                Console.WriteLine("Press ENTER to exit program...");
-                Console.ReadLine();
+                Console.WriteLine("Most likely, it is not enabled. Please make sure it is enabled, and try again.");
+                Console.WriteLine("Press any key to exit...");
+                Console.ReadKey();
                 Environment.Exit(1);
             }
 
             (var SensorIndexes, uint PPTIndex, uint AvgEffectiveClock) = GetSensorIndexes();
             Console.WriteLine($"Detected {SensorIndexes.Count} physical cores on your system.");
-            Console.WriteLine("Running a scalar stress test until the system reaches thermal equalibrium. This may take a while...");
-
-            ycruncherBKT.Start();
-
-            while (true)
-            {
-                var InitialPPT = GetSensorReading(PPTIndex);
-                Thread.Sleep(55000);
-                var PPTAvg = GetAvgSensorOverPeriod(PPTIndex, 5000);
-                Console.WriteLine($"PPT changed by {InitialPPT - PPTAvg} over the last minute.");
-                if (Math.Abs(InitialPPT - PPTAvg) <= 3) break;
-            }
-
-            Console.WriteLine("System thermally saturated. Collecting data on initial multithreaded scalar clock speeds.");
-
-            var StockBKTClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
-
-            ycruncherBKT.Kill(true);
-            ycruncherBBP.Start();
-
-            Console.WriteLine("Running an AVX2|512 stress test until the system reaches thermal equalibrium. This may take a while...");
-
-            while (true)
-            {
-                var InitialPPT = GetSensorReading(PPTIndex);
-                Thread.Sleep(55000);
-                var PPTAvg = GetAvgSensorOverPeriod(PPTIndex, 5000);
-                Console.WriteLine($"PPT changed by {InitialPPT - PPTAvg} over the last minute.");
-                if (Math.Abs(InitialPPT - PPTAvg) <= 3) break;
-            }
-
-            Console.WriteLine("System thermally saturated. Collecting data on initial multithreaded AVX2|512 clock speeds.");
-
-            var StockBBPClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
 
             List<int> PBOOffsets = [];
 
-            Console.WriteLine($"Stock Scalar multicore average: {StockBKTClockAvg}");
-            Console.WriteLine($"Stock AVX2|512 multicore average: {StockBBPClockAvg}");
             Console.WriteLine("Starting undervolting routine...");
 
-            ycruncherBBP.Kill(true);
-            ycruncherBKT.Start();
+            int ycruncherThreadCount = (SensorIndexes.Count * 2) - 1;
 
-            Thread.Sleep(10000);
+            StartYcruncher("BKT", ycruncherThreadCount);
 
             for (int i = 0; i < SensorIndexes.Count; i++)
             {
@@ -116,7 +106,7 @@ namespace RyzenPBOVIDSync
                 double[] CoreVIDs = new double[SensorIndexes.Count];
                 long StartTime = DateTimeOffset.Now.ToUnixTimeMilliseconds();
 
-                while (DateTimeOffset.Now.ToUnixTimeMilliseconds() - StartTime <= 5000)
+                while (DateTimeOffset.Now.ToUnixTimeMilliseconds() - StartTime <= 1000)
                 {
                     for (int i = 0; i < SensorIndexes.Count; i++) CoreVIDs[i] += GetSensorReading(SensorIndexes[i]["VID"]);
                     Thread.Sleep(200);
@@ -127,56 +117,63 @@ namespace RyzenPBOVIDSync
 
                 for (int i = 0; i < SensorIndexes.Count; i++) CoreAvgVIDs.Add(CoreVIDs[i] / iterations);
                 
-                if (CoreAvgVIDs.Max() - CoreAvgVIDs.Min() <= 0.005) break;
+                // 0.004 is chosen as that is the best-case minimum delta that I have seen.
+                if (CoreAvgVIDs.Max() - CoreAvgVIDs.Min() <= 0.004) break;
                 
                 else
                 {
                     int HighestIndex = GetHighestVIDIndex(CoreAvgVIDs);
                     PBOOffsets[HighestIndex] -= 1;
-                    Console.WriteLine($"Worst VID delta: {CoreAvgVIDs.Max() - CoreAvgVIDs.Min()}");
+                    Console.WriteLine($"Worst VID delta: {CoreAvgVIDs.Max() - CoreAvgVIDs.Min():F3}");
                     ApplyPBOOffset($"{HighestIndex}:{PBOOffsets[HighestIndex]}");
                 }
 
                 // Give the values a chance to settle after changing...
-                Thread.Sleep(2000);
+                Thread.Sleep(100);
             }
 
-            Console.WriteLine("Undervolting completed, gathering new clock speed data...");
-
-            while (true)
-            {
-                var InitialPPT = GetSensorReading(PPTIndex);
-                Thread.Sleep(55000);
-                var PPTAvg = GetAvgSensorOverPeriod(PPTIndex, 5000);
-                Console.WriteLine($"PPT changed by {InitialPPT - PPTAvg} over the last minute.");
-                if (Math.Abs(InitialPPT - PPTAvg) <= 3) break;
-            }
+            Console.WriteLine("Undervolting completed, gathering clock speed data...");
 
             var NewBKTClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
+            var NewBKTPPTAvg = GetAvgSensorOverPeriod(PPTIndex, 10000);
 
-            ycruncherBKT.Kill(true);
-            ycruncherBBP.Start();
-
-            while (true)
-            {
-                var InitialPPT = GetSensorReading(PPTIndex);
-                Thread.Sleep(55000);
-                var PPTAvg = GetAvgSensorOverPeriod(PPTIndex, 5000);
-                Console.WriteLine($"PPT changed by {InitialPPT - PPTAvg} over the last minute.");
-                if (Math.Abs(InitialPPT - PPTAvg) <= 3) break;
-            }
+            ycruncher.Kill(true);
+            StartYcruncher("BBP", ycruncherThreadCount);
 
             var NewBBPClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
+            var NewBBPPPTAvg = GetAvgSensorOverPeriod(PPTIndex, 10000);
 
-            Console.WriteLine($"New Scalar multicore average: {NewBKTClockAvg}");
-            Console.WriteLine($"New AVX2|512 multicore average: {NewBBPClockAvg}");
+            ryzen.SetPsmMarginAllCores(0);
 
-            Console.WriteLine($"Improved average multicore clock speed in Scalar workloads by {NewBKTClockAvg / StockBKTClockAvg}");
-            Console.WriteLine($"Improved average multicore clock speed in AVX2|512 workloads by {NewBBPClockAvg / StockBBPClockAvg}");
+            ycruncher.Kill(true);
+            StartYcruncher("BKT", ycruncherThreadCount);
 
-            ycruncherBBP.Kill(true);
+            var StockBKTClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
+            var StockBKTPPTAvg = GetAvgSensorOverPeriod(PPTIndex, 10000);
 
-            Console.WriteLine("Current PBO settings are temporary. Please enter your BIOS to make this configuration permanent.");
+            ycruncher.Kill(true);
+            StartYcruncher("BBP", ycruncherThreadCount);
+
+            var StockBBPClockAvg = GetAvgSensorOverPeriod(AvgEffectiveClock, 10000);
+            var StockBBPPTTAvg = GetAvgSensorOverPeriod(PPTIndex, 10000);
+
+            ycruncher.Kill(true);
+
+            for (int i = 0; i < SensorIndexes.Count; i++) ApplyPBOOffset($"{i}:{PBOOffsets[i]}");
+
+            Console.WriteLine($"Original Scalar multicore average: {StockBKTClockAvg:F2}");
+            Console.WriteLine($"Original AVX2|512 multicore average: {StockBBPClockAvg:F2}");
+            Console.WriteLine($"New Scalar multicore average: {NewBKTClockAvg:F2}");
+            Console.WriteLine($"New AVX2|512 multicore average: {NewBBPClockAvg:F2}");
+
+            Console.WriteLine($"Improved average multicore clock speed in Scalar workloads by {NewBKTClockAvg / StockBKTClockAvg:F2}x above baseline.");
+            Console.WriteLine($"Improved average multicore clock speed in AVX2|512 workloads by {NewBBPClockAvg / StockBBPClockAvg:F2}x above baseline.");
+            Console.WriteLine($"Original scalar efficiency: {StockBKTClockAvg / StockBKTPPTAvg:F2} MHz/w");
+            Console.WriteLine($"Original AVX2|512 efficiency: {StockBBPClockAvg / StockBBPPTTAvg:F2} MHz/w");
+            Console.WriteLine($"New scalar efficiency: {NewBKTClockAvg / NewBKTPPTAvg:F2} MHz/w");
+            Console.WriteLine($"New AVX2|512 efficiency: {NewBBPClockAvg / NewBBPPPTAvg:F2} MHz/w");
+
+            Console.WriteLine("Enter these settings into your BIOS to make this configuration permanent.");
             Console.WriteLine("Final PBO settings:");
 
             for (int i = 0; i < SensorIndexes.Count; i++) Console.WriteLine($"Core {i}: {PBOOffsets[i]}");
@@ -184,15 +181,45 @@ namespace RyzenPBOVIDSync
             Console.WriteLine("Thank you for using Ryzen PBO VID Sync.");
             Console.WriteLine("rawhide kobayashi - https://blog.neet.works/");
 
-            Console.WriteLine("Press ENTER to exit program...");
-            Console.ReadLine();
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
 
-            ycruncherBBP.Dispose();
-            ycruncherBKT.Dispose();
+            ycruncher.Dispose();
             ryzen.Dispose();
             mmf.Dispose();
 
             return 0;
+        }
+
+        private static void StartYcruncher(string testType, int ycruncherThreadCount)
+        {
+            File.WriteAllText("y-cruncher\\test.cfg", string.Format(ycruncherConfigTemplate, Convert.ToString(ycruncherThreadCount), testType));
+            ycruncher.Start();
+        }
+
+        private static bool IsAdministrator()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                WindowsPrincipal principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+        }
+
+        private static List<int> MapUnavailableCores()
+        {
+            List<int> unavailableCores = [];
+            if (ryzen.smu.Rsmu.SMU_MSG_SetDldoPsmMargin != 0)
+            {
+                uint cores = ryzen.info.topology.physicalCores;
+                for (var i = 0; i < cores; i++)
+                {
+                    int mapIndex = i < 8 ? 0 : 1;
+                    if ((~ryzen.info.topology.coreDisableMap[mapIndex] >> i % 8 & 1) == 0) unavailableCores.Add(i);
+                }
+            }
+
+            return unavailableCores;
         }
 
         private static int GetHighestVIDIndex(List<double> VIDs)
@@ -243,11 +270,6 @@ namespace RyzenPBOVIDSync
                     handle.Free();
 
                     masterSensorNames.Add(SensorElement.szSensorNameUser);
-
-                    //Console.WriteLine(String.Format("dwSensorID : {0}", SensorElement.dwSensorID));
-                    //Console.WriteLine(String.Format("dwSensorInst : {0}", SensorElement.dwSensorInst));
-                    //Console.WriteLine(String.Format("szSensorNameOrig : {0}", SensorElement.szSensorNameOrig));
-                    //Console.WriteLine(String.Format("szSensorNameUser : {0}", SensorElement.szSensorNameUser));
                 }
                 for (uint dwReading = 0; dwReading < numReadingElements; dwReading++)
                 {
@@ -259,14 +281,7 @@ namespace RyzenPBOVIDSync
                         typeof(HWiNFOWrapper._HWiNFO_SENSORS_READING_ELEMENT));
                     handle.Free();
 
-                    //Console.WriteLine(String.Format("tReading : {0}", ReadingElement.tReading));
-                    //Console.WriteLine(String.Format("dwSensorIndex : {0} ; Sensor Name: {1}", ReadingElement.dwSensorIndex, masterSensorNames[(int)ReadingElement.dwSensorIndex]));
-                    //Console.WriteLine(String.Format("dwReadingID : {0}", ReadingElement.dwSensorIndex));
-                    //Console.WriteLine(String.Format("szLabelUser : {0}", ReadingElement.szLabelUser));
-                    //Console.WriteLine(String.Format("szUnit : {0}", ReadingElement.szUnit));
-                    //Console.WriteLine(String.Format("Value : {0}", ReadingElement.Value));
-
-                    Match match = Regex.Match(ReadingElement.szLabelOrig, @"(?<core_vid>Core [0-9]* VID)|(?<core_mhz>Core [0-9]* T0 Effective Clock)|(?<ppt>CPU PPT)|(?<avg_eff_clock>Average Effective Clock)");
+                    Match match = Regex.Match(ReadingElement.szLabelOrig, @"(?<core_vid>Core [0-9]* VID)|(?<core_mhz>Core [0-9]* T0 Effective Clock)|(?<ppt>^CPU PPT$)|(?<avg_eff_clock>Average Effective Clock)");
 
                     if (match.Success)
                     {
@@ -334,11 +349,17 @@ namespace RyzenPBOVIDSync
         private static void ApplyPBOOffset(string offsetArgs)
         {
             string[] arg = offsetArgs.Split(',');
+            var unavailableCoreMap = MapUnavailableCores();
+            int coreOffset = 0;
 
             for (int i = 0; i < arg.Length; i++) 
             {
                 int core = Convert.ToInt32(arg[i].Split(':')[0]);
                 int offset = Convert.ToInt32(arg[i].Split(':')[1]);
+                
+                // This is a user-oriented feature to allow you to input cores sequentially instead of mapping out
+                // the disabled cores yourself. I do not have the hardware available to test it.
+                if (unavailableCoreMap.Contains(core + coreOffset)) coreOffset += 1;
 
                 // Magic numbers from SMUDebugTool
                 // This does some bitshifting calculations to get the mask for individual cores for chips with up to two CCDs
